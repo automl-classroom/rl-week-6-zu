@@ -173,7 +173,21 @@ class PPOAgent(AbstractAgent):
             Value targets for training the critic.
         """
         # TODO: compute advantages using GAE (Hint: replicate the GAE formula from actor critc)
-        return None
+        advantages = torch.zeros_like(values)
+        gae = 0.0
+        for t in reversed(range(len(rewards))):
+            delta = (
+                rewards[t] + self.gamma * next_values[t] * (1 - dones[t]) - values[t]
+            )
+            gae = delta + self.gamma * self.gae_lambda * gae * (1 - dones[t])
+            advantages[t] = gae
+        returns = advantages + values
+
+        # ✅ normalize advantages
+        advantages = (advantages - advantages.mean()) / (
+            advantages.std(unbiased=False) + 1e-8
+        )
+        return advantages, returns
 
     def update(self, trajectory: List[Any]) -> None:
         """
@@ -202,12 +216,17 @@ class PPOAgent(AbstractAgent):
         dones = torch.tensor([t[5] for t in trajectory], dtype=torch.float32)  # noqa: F841
 
         # TODO:  compute values and next_values without gradients
-        values = ...  # noqa: F841
-        next_values = ...  # noqa: F841
+        next_states = torch.stack([torch.from_numpy(t[6]).float() for t in trajectory])
+
+        with torch.no_grad():
+            values = self.value_fn(states)
+            next_values = self.value_fn(next_states)
 
         # TODO: compute advantages and returns
-        advantages = ...
-        returns = ...
+        advantages, returns = self.compute_gae(rewards, values, next_values, dones)
+        advantages = (advantages - advantages.mean()) / (
+            advantages.std(unbiased=False) + 1e-8
+        )
 
         dataset = torch.utils.data.TensorDataset(
             states, actions, old_logps, advantages, returns
@@ -219,20 +238,32 @@ class PPOAgent(AbstractAgent):
         for _ in range(self.epochs):
             for b_states, b_actions, b_oldlogp, b_adv, b_ret in loader:
                 # TODO: compute policy loss, value loss, and entropy loss
+                probs = self.policy(b_states)
+                dist = Categorical(probs)
 
                 # TODO: compute new log probabilities by sampling actions from the policy distribution
-                new_logp = ...  # noqa: F841
+                new_logp = dist.log_prob(b_actions)  # noqa: F841
 
                 # TODO: compute the ratio of new log probabilities to old log probabilities
+                ratio = (new_logp - b_oldlogp).exp()
+                approx_kl = (b_oldlogp - new_logp).mean()  # ← 关键
+
+                if approx_kl > 0.03:
+                    print(f"[KL-EarlyStop] approx_kl={approx_kl:.4f}, skipping update")
+                    return 0.0, 0.0, 0.0  # 提前退出该 batch
+                surr1 = ratio * b_adv
+                surr2 = (
+                    torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * b_adv
+                )
 
                 # TODO: compute the clipped surrogate loss using the clipped objective
-                policy_loss = ...
-
+                policy_loss = -torch.min(surr1, surr2).mean()
                 # TODO: compute value loss using mean squared error
-                value_loss = ...
+                value_pred = self.value_fn(b_states)
+                value_loss = (value_pred - b_ret).pow(2).mean()
 
                 # TODO: compute entropy loss using the distribution's entropy
-                entropy_loss = ...
+                entropy_loss = dist.entropy().mean()
 
                 loss = (
                     policy_loss
@@ -263,6 +294,10 @@ class PPOAgent(AbstractAgent):
         eval_episodes : int, optional
             Number of episodes to average over during evaluation (default is 5).
         """
+
+        import os
+
+        os.makedirs("results", exist_ok=True)
         eval_env = gym.make(self.env.spec.id)
         step_count = 0
         while step_count < total_steps:
@@ -275,7 +310,15 @@ class PPOAgent(AbstractAgent):
                 next_state, reward, term, trunc, _ = self.env.step(action)
                 done = term or trunc
                 trajectory.append(
-                    (state, action, logp, ent, reward, float(done), next_state)
+                    (
+                        state,
+                        action,
+                        logp.detach(),
+                        ent.detach(),
+                        reward,
+                        float(done),
+                        next_state,
+                    )
                 )
                 state = next_state
                 step_count += 1
@@ -285,6 +328,10 @@ class PPOAgent(AbstractAgent):
                     print(
                         f"[Eval ] Step {step_count:6d} AvgReturn {mean_r:5.1f} ± {std_r:4.1f}"
                     )
+                    with open(
+                        f"results/{self.__class__.__name__.lower()}.csv", "a"
+                    ) as f:
+                        f.write(f"{step_count},{mean_r},{std_r}\n")
 
             # PPO update
             policy_loss, value_loss, entropy_loss = self.update(trajectory)
@@ -294,6 +341,10 @@ class PPOAgent(AbstractAgent):
             )
 
         print("Training complete.")
+        if step_count % eval_interval != 0:
+            mean_r, std_r = self.evaluate(eval_env, num_episodes=eval_episodes)
+            with open("results/ppo_vanilla.csv", "a") as f:
+                f.write(f"{step_count},{mean_r},{std_r}\n")
 
     def evaluate(
         self, eval_env: gym.Env, num_episodes: int = 10
