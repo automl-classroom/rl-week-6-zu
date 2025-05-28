@@ -1,19 +1,16 @@
 env:
   name: LunarLander-v3
-
 seed: 0
-
 agent:
   _target_: rl_exercises.week_6.actor_critic.ActorCriticAgent
-  lr_actor: 5e-4
-  lr_critic: 1e-3
+  lr_actor: 0.0005
+  lr_critic: 0.001
   gamma: 0.99
   gae_lambda: 0.95
   hidden_size: 128
-  baseline_type: "gae"  # 或 "avg", "value", "none"
+  baseline_type: gae
   baseline_decay: 0.9
-
 train:
-  total_steps: 200000
-  eval_interval: 10000
+  total_steps: 100000
+  eval_interval: 5000
   eval_episodes: 5

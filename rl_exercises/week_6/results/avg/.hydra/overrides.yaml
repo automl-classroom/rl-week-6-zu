@@ -1,0 +1,4 @@
+- agent.baseline_type=avg
+- train.total_steps=100000
+- train.eval_interval=5000
+- train.eval_episodes=5
